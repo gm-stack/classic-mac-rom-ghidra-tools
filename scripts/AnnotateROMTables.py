@@ -287,8 +287,8 @@ forceSetDataType = lambda addr, dtype: DataUtilities.createData(
 addressDecoderInfoTables = set()
 
 def decode_table(table_pos, table_num):
-	print("Decoding table %i at %x" % (table_num, table_pos))
 	tableStart = romAddr(table_pos)
+	print("Decoding table %i at %s" % (table_num, tableStart))
 	
 	createLabel(tableStart, "__Universal_Table_%i" % table_num, True)
 	createLabel(tableStart.add(-4), "__Universal_Table_%i_MinusFour" % table_num, True)
@@ -298,7 +298,7 @@ def decode_table(table_pos, table_num):
 		table_entry_addr = romAddr(table_pos)
 		entry = read_uLong(table_entry_addr)
 		
-		print("Reading entry at 0x%x: 0x%x" % (table_pos, entry))
+		print("Reading entry at %s : 0x%x" % (table_entry_addr, entry))
 		if entry == 0:
 			setEOLComment(table_entry_addr, "end of list")
 			break
@@ -311,7 +311,9 @@ def decode_table(table_pos, table_num):
 		boxInfo = read_uByte(box_ptr)
 		decoder_id_ptr = info_ptr.add(box_offset+1)
 		decoder_info = read_uByte(decoder_id_ptr)
-		createLabel(info_ptr, "__Machine_%s_%s" % (boxname(boxInfo).replace(" ","_"),decoder(decoder_info).replace(" ","_")) , True)
+		labelName = "__Machine_%s_%s" % (boxname(boxInfo).replace(" ","_"),decoder(decoder_info).replace(" ","_"))
+		print("Labelling machine %s at %s" % (labelName, info_ptr))
+		createLabel(info_ptr, labelName , True)
 
 		# save unique combinations of absolute address decoder mem info and decoder name
 		addr_decoder_offset = read_long(info_ptr)
