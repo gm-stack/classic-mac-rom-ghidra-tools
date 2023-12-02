@@ -23,7 +23,7 @@
 # - MEMORY_REGION:0x1234abcd
 # Omitting the address space or memory region specifier from the address will result in the function or label being created in the default address space.
 # @author unkown; edited by matedealer <git@matedealer.de>
-# @category Data
+#@category MacRomHacking
 #
 
 OFFSET = 0x00000000

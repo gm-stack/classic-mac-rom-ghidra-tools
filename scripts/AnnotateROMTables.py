@@ -1,10 +1,10 @@
 # Find the machine table in an old world ROM image and annotate with comments, labels, references and data types
-# @author gm-stack - initial values for some ROM tables stolen from rb6502's unirom https://github.com/rb6502/unirom
+# @author gm-stack - initial values for rom_offsets and some names stolen from rb6502's unirom https://github.com/rb6502/unirom
 # @category MacRomHacking
 #
 
 from ghidra.program.model.symbol.SourceType import *
-from ghidra.program.model.data import ArrayDataType, EnumDataType
+from ghidra.program.model.data import ArrayDataType, EnumDataType, PointerTypedef
 from ghidra.program.model.symbol.RefType import DATA as RefType_Data
 from ghidra.app.cmd.data import CreateArrayCmd
 from ghidra.program.model.data import DataTypeConflictHandler, DataUtilities
@@ -106,8 +106,8 @@ def array_to_enum(data, name, size):
 		enum.add(clean_identifier, count)
 	data_type_manager.addDataType(enum, DataTypeConflictHandler.REPLACE_HANDLER)
 
-array_to_enum(boxnames, "box_info", 1)
-array_to_enum(decoders, "mem_decoder", 1)
+array_to_enum(boxnames, "boxInfo", 1)
+array_to_enum(decoders, "memDecoderType", 1)
 
 
 hwCfgFlagsStruct = parseC("""struct hwCfgFlags {
@@ -121,7 +121,7 @@ hwCfgFlagsStruct = parseC("""struct hwCfgFlags {
     bool hasPowerManager:1;
 };""")
 
-baseAddrFlagsStruct = parseC("""struct BaseAddrFlags {
+baseAddrFlags = parseC("""struct baseAddrFlags {
 	bool Unused31Exists:1;
 	bool NewAgeExists:1;
 	bool PatchROMAddrExists:1;
@@ -159,19 +159,19 @@ baseAddrFlagsStruct = parseC("""struct BaseAddrFlags {
 # probably only valid for machines with 18, 32, 60 in table above.
 # Need to pull apart some other ROMs to figure out what's going on.
 
-MachineInfoStruct = parseC("""struct MachineInfoStruct {
-    prel31 AddrDecoderInfo;
+machineInfo = parseC("""struct machineInfo {
+    prel31 addrDecoderInfo;
     prel31 RamInfo;
     prel31 VideoInfo;
     prel31 NuBusInfo;
     hwCfgFlags hwCfgFlags;
     byte unusedBits;
-    box_info productKindBoxInfo;
-    mem_decoder decoderKind;
+    boxInfo productKindBoxInfo;
+    memDecoderType decoderKind;
     word rom85flags;
     byte romRsrcConfig;
     byte ProductInfoVersion; // potentially this tells us field formats
-    BaseAddrFlags baseAddressFlags0_31;
+    baseAddrFlags baseAddressFlags0_31;
     ulong extFeatureFlags;
     ulong via1;
     ulong via2;
@@ -183,7 +183,7 @@ MachineInfoStruct = parseC("""struct MachineInfoStruct {
     ulong MachineCPUID;
 };""")
 
-DecoderInfoStruct = parseC("""struct DecoderInfoStruct {
+addrDecoderInfo = parseC("""struct addrDecoderInfo {
 	// "private" vars, 0x24 in size. Need to make "shifted" type in this script.
     long unknown1;
     long unknown2;
@@ -247,6 +247,14 @@ DecoderInfoStruct = parseC("""struct DecoderInfoStruct {
 	// pointer Grand_Central;
 };""")
 
+def createShiftedPointer(data_type, name, shift):
+	shifted = PointerTypedef(name, data_type, -1, data_type_manager, shift)
+	data_type_manager.addDataType(shifted, DataTypeConflictHandler.REPLACE_HANDLER)
+	return shifted
+
+createShiftedPointer(addrDecoderInfo, "addrDecoderInfo_public", 0x24)
+
+
 memory = currentProgram.getMemory()
 
 def readDT(address,data_type,readfunc,sizemask):
@@ -297,13 +305,13 @@ def decode_table(table_pos, table_num):
 
 		machine_entries += 1
 		info_ptr = table_entry_addr.add(entry)
-		forceSetDataType(info_ptr, MachineInfoStruct)
+		forceSetDataType(info_ptr, machineInfo)
 
 		box_ptr = info_ptr.add(box_offset)
-		box_info = read_uByte(box_ptr)
+		boxInfo = read_uByte(box_ptr)
 		decoder_id_ptr = info_ptr.add(box_offset+1)
 		decoder_info = read_uByte(decoder_id_ptr)
-		createLabel(info_ptr, "__Machine_%s_%s" % (boxname(box_info).replace(" ","_"),decoder(decoder_info).replace(" ","_")) , True)
+		createLabel(info_ptr, "__Machine_%s_%s" % (boxname(boxInfo).replace(" ","_"),decoder(decoder_info).replace(" ","_")) , True)
 
 		# save unique combinations of absolute address decoder mem info and decoder name
 		addr_decoder_offset = read_long(info_ptr)
@@ -326,4 +334,4 @@ for decoder_table_name, decoder_table_addr in addressDecoderInfoTables:
 	print("labelling %s @ %s:0x%x" % (decoder_table_name, MEMORY_MAP_NAME, decoder_table_addr))
 	tableStart = romAddr(decoder_table_addr - 0x24)
 	createLabel(tableStart, "__MemCtrl_%s" % cleanup_identifier(decoder_table_name), True)
-	forceSetDataType(tableStart, DecoderInfoStruct)
+	forceSetDataType(tableStart, addrDecoderInfo)
