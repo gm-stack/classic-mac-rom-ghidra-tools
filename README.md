@@ -9,6 +9,8 @@ Some assorted (and very unfinished) scripts for Ghidra.
 
 Based on [unirom](https://github.com/rb6502/unirom) by rb6502, read the machine support tables from the ROM and annotate all the machine support tables and their entries.
 
+I've written some structs and data types for Ghidra to be able to better resolve references to this data.
+
 ### FindRomWrites.py
 
 In order to reverse engineer the early boot process, there's a second copy of the ROM mapped at 0x00000000 (as well as the usual 0x40000000). When the machine first switches on, ROM is mapped to the zero address as well to allow the m68k to load SP from 0x0:4 and PC from 0x4:8. This will remap all the reads/writes in this space into RAM, which they are more likely to be.

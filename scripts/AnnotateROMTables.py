@@ -1,11 +1,15 @@
 # Find the machine table in an old world ROM image and annotate with comments, labels, references and data types
-# @author gm-stack - ROM tables stolen from rb6502's unirom https://github.com/rb6502/unirom
+# @author gm-stack - initial values for some ROM tables stolen from rb6502's unirom https://github.com/rb6502/unirom
 # @category MacRomHacking
 #
 
 from ghidra.program.model.symbol.SourceType import *
-from ghidra.program.model.data import ArrayDataType
+from ghidra.program.model.data import ArrayDataType, EnumDataType
 from ghidra.program.model.symbol.RefType import DATA as RefType_Data
+from ghidra.app.cmd.data import CreateArrayCmd
+from ghidra.program.model.data import DataTypeConflictHandler, DataUtilities
+from ghidra.app.util.cparser.C import CParser
+
 import string
 
 ROM_START_ADDR=0x0
@@ -32,13 +36,6 @@ decoders = [
 def decoder(num):
 	if num >= 25: return "unknown (%i)" % num
 	return decoders[num]
-
-decoder_regs = [
-	"ROM", "diag ROM", "VIA1", "SCC Read", "SCC Write", "IWM/SWIM", "PWM", "Sound", "SCSI", "SCSIDack", "SCSIHsk",
-	"VIA2", "ASC", "RBV", "VDAC", "SCSIDMA", "SWIMIOP", "SCCIOP", "OSS", "FMC", "RPU", "Orwell", "JAWS", "SONIC", "SCSI96 1", "SCSI96 2",
-	"DAFB or Civic", "PSC DMA", "ROMPhysAddr", "Patch ROM", "NewAge", "Unused31", "Singer", "DSP", "MACE", "MUNI", "AMIC DMA",
-	"Pratt", "SWIM3", "AWACS", "Civic", "Sebastian", "BART", "Grand Central"
-]
 
 rom_offsets = {
 		0x368cadfe: [0x000032c0, 0x00000000, 18, 32, 60, 'IIci'],
@@ -82,13 +79,177 @@ rom_offsets = {
 		0xb46ffb63: [0x00014390, 0x00014398, 18, 48, 88, 'PowerBook G3 "WallStreet"']
 }
 
+data_type_manager = currentProgram.getDataTypeManager()
+
+def parseC(struct_txt):
+	parser = CParser(data_type_manager)
+	parsed_datatype = parser.parse(struct_txt)
+	return data_type_manager.addDataType(parsed_datatype, DataTypeConflictHandler.REPLACE_HANDLER)
+
+def cleanup_identifier(dirty_name):
+	if dirty_name[0].isnumeric():
+		dirty_name = '_' + dirty_name
+	chars_to_replace = "/ ()"
+	for c in chars_to_replace:
+		dirty_name = dirty_name.replace(c, "_")
+	dirty_name = dirty_name.replace("+","plus")
+	return dirty_name
+
+def array_to_enum(data, name, size):
+	already_included=set()
+	enum = EnumDataType(name, size)
+	for count, value in enumerate(data):
+		clean_identifier = cleanup_identifier(value)
+		while clean_identifier in already_included:
+			clean_identifier += '_'
+		already_included.add(clean_identifier)
+		enum.add(clean_identifier, count)
+	data_type_manager.addDataType(enum, DataTypeConflictHandler.REPLACE_HANDLER)
+
+array_to_enum(boxnames, "box_info", 1)
+array_to_enum(decoders, "mem_decoder", 1)
+
+
+hwCfgFlagsStruct = parseC("""struct hwCfgFlags {
+	bool hasSCSI:1;
+    bool hasNewClock:1;
+    bool hasXPRam:1;
+    bool hasFPU:1;
+    bool hasMMU:1;
+    bool hasADB:1;
+    bool isRunningA_UX:1;
+    bool hasPowerManager:1;
+};""")
+
+baseAddrFlagsStruct = parseC("""struct BaseAddrFlags {
+	bool Unused31Exists:1;
+	bool NewAgeExists:1;
+	bool PatchROMAddrExists:1;
+	bool ROMPhysAddrExists:1;
+	bool PSC_DMAExists:1;
+	bool DAFB_or_CivicExists:1;
+	bool SCSI96_2_extExists:1;
+	bool SCSI96_1_intExists:1;
+	bool SONICExists:1;
+	bool JAWSExists:1;
+	bool OrwellExists:1;
+	bool RPUExists:1;
+	bool FMCExists:1;
+	bool OSSExists:1;
+	bool SCCIOPExists:1;
+	bool SWIMIOPExists:1;
+	bool SCSIDMAExists:1;
+	bool VDACExists:1;
+	bool RBVExists:1;
+	bool ASCExists:1;
+	bool VIA2Exists:1;
+	bool SCSIHskExists:1;
+	bool SCSIDackExists:1;
+	bool SCSIExists:1;
+	bool SoundExists:1;
+	bool PWMExists:1;
+	bool IWM_SWIMExists:1;
+	bool SCCWriteExists:1;
+	bool SCCReadExists:1;
+	bool VIA1Exists:1;
+	bool diagROMExists:1;
+	bool ROMExists:1;
+};""")
+
+# probably only valid for machines with 18, 32, 60 in table above.
+# Need to pull apart some other ROMs to figure out what's going on.
+
+MachineInfoStruct = parseC("""struct MachineInfoStruct {
+    prel31 AddrDecoderInfo;
+    prel31 RamInfo;
+    prel31 VideoInfo;
+    prel31 NuBusInfo;
+    hwCfgFlags hwCfgFlags;
+    byte unusedBits;
+    box_info productKindBoxInfo;
+    mem_decoder decoderKind;
+    word rom85flags;
+    byte romRsrcConfig;
+    byte ProductInfoVersion; // potentially this tells us field formats
+    BaseAddrFlags baseAddressFlags0_31;
+    ulong extFeatureFlags;
+    ulong via1;
+    ulong via2;
+    ulong extFeatureFlags2;
+    ulong extFeatureFlags3;
+    int VIA1InitOffset;
+    int VIA2InitOffset;
+    prel31 VIA1InitInfo;
+    ulong MachineCPUID;
+};""")
+
+DecoderInfoStruct = parseC("""struct DecoderInfoStruct {
+	// "private" vars, 0x24 in size. Need to make "shifted" type in this script.
+    long unknown1;
+    long unknown2;
+    long unknown3;
+    long unknown4;
+    long defaultBases;
+    long defaultExtFeatures;
+    byte avoidVIA1A;
+    byte avoidVIA1B;
+    byte avoidVIA2A;
+    byte avoidVIA2B;
+    long checkForProc;
+    byte addrMap;
+    byte decoderInfoVers;
+    byte filler[2];
+
+	// "public" vars, pointer is to here
+	pointer ROM;
+	pointer diagROM;
+	pointer VIA1;
+	pointer SCCRead;
+	pointer SCCWrite;
+	pointer IWM_SWIM;
+	pointer PWM;
+	pointer Sound;
+	pointer SCSI;
+	pointer SCSIDack;
+	pointer SCSIHsk;
+	pointer VIA2;
+	pointer ASC;
+	pointer RBV;
+	pointer VDAC;
+	pointer SCSIDMA;
+	pointer SWIMIOP;
+	pointer SCCIOP;
+	pointer OSS;
+	pointer FMC;
+	pointer RPU;
+	pointer Orwell;
+	pointer JAWS;
+	pointer SONIC;
+	pointer SCSI96_1_int;
+	pointer SCSI96_2_ext;
+	pointer DAFB_or_Civic;
+	pointer PSC_DMA;
+	pointer ROMPhysAddr;
+	pointer PatchROMAddr;
+	pointer NewAge;
+	pointer Unused31;
+	// pointer Singer; // too long given minimum spacing in ROM. I believe this is not in version 0.
+	// pointer DSP;
+	// pointer MACE;
+	// pointer MUNI;
+	// pointer AMIC_DMA;
+	// pointer Pratt;
+	// pointer SWIM3;
+	// pointer AWACS;
+	// pointer Civic;
+	// pointer Sebastian;
+	// pointer BART;
+	// pointer Grand_Central;
+};""")
+
 memory = currentProgram.getMemory()
 
 def readDT(address,data_type,readfunc,sizemask):
-	DTLong = getDataTypes(data_type)[0]
-	if getDataAt(address):
-		removeDataAt(address)
-	createData(address, DTLong)
 	data = readfunc(address)
 	if sizemask: data = data & sizemask
 	return data
@@ -110,8 +271,20 @@ table_1, table_2, box_offset, via_offset, machine_offset, machine_name = rom_off
 print("Detected ROM as %s" % machine_name)
 setEOLComment(checksum_ptr, machine_name)
 
+forceSetDataType = lambda addr, dtype: DataUtilities.createData(
+	currentProgram, addr, dtype, 0, 
+	False, DataUtilities.ClearDataMode.CLEAR_ALL_CONFLICT_DATA
+)
+
+addressDecoderInfoTables = set()
+
 def decode_table(table_pos, table_num):
-	createLabel(romAddr(table_pos), "__CPUID_Info_Table_%i" % table_num, True)
+	print("Decoding table %i at %x" % (table_num, table_pos))
+	tableStart = romAddr(table_pos)
+	
+	createLabel(tableStart, "__Universal_Table_%i" % table_num, True)
+	createLabel(tableStart.add(-4), "__Universal_Table_%i_MinusFour" % table_num, True)
+	machine_entries = 0
 	
 	while True:
 		table_entry_addr = romAddr(table_pos)
@@ -122,37 +295,35 @@ def decode_table(table_pos, table_num):
 			setEOLComment(table_entry_addr, "end of list")
 			break
 
-		info_ptr = table_entry_addr.add(entry) # increment from table entry addr by value of table entry addr
-		decoder_offset = read_uLong(info_ptr)
-		setEOLComment(info_ptr,"DecoderInfo: %x" % decoder_offset)
-		createMemoryReference(getDataAt(table_entry_addr), info_ptr, RefType_Data)
-		
-		video_ptr = info_ptr.add(8)
-		video_offset = read_long(video_ptr)
-		setEOLComment(video_ptr,"VideoInfo: %x" % video_offset)
-		
+		machine_entries += 1
+		info_ptr = table_entry_addr.add(entry)
+		forceSetDataType(info_ptr, MachineInfoStruct)
+
 		box_ptr = info_ptr.add(box_offset)
 		box_info = read_uByte(box_ptr)
-		setEOLComment(box_ptr, "BoxInfo: %s" % boxname(box_info))
-
 		decoder_id_ptr = info_ptr.add(box_offset+1)
 		decoder_info = read_uByte(decoder_id_ptr)
-		setEOLComment(decoder_id_ptr,"DecoderID: %s" % decoder(decoder_info))
 		createLabel(info_ptr, "__Machine_%s_%s" % (boxname(box_info).replace(" ","_"),decoder(decoder_info).replace(" ","_")) , True)
 
+		# save unique combinations of absolute address decoder mem info and decoder name
+		addr_decoder_offset = read_long(info_ptr)
+		addr_decoder_ptr = table_pos + entry + addr_decoder_offset
+		addressDecoderInfoTables.add((decoder(decoder_info), addr_decoder_ptr))
 
-		via_ptr = info_ptr.add(via_offset)
-		via_ptr_2 = info_ptr.add(via_offset+4)
-		read_uLong(via_ptr)
-		read_uLong(via_ptr_2)
-		setEOLComment(via_ptr,"via1")
-		setEOLComment(via_ptr_2,"via2")
-
-		id_ptr = info_ptr.add(machine_offset)
-		read_uWord(id_ptr)
-		setEOLComment(id_ptr,"id")
-
+		# next table entry
 		table_pos += 4
+	
+	# make a nice array of machines, using prel31 datatype to have Ghidra resolve relative pointers
+	print("got %i machines" % machine_entries)
+	prel31 = getDataTypes('prel31')[0]
+	runCommand(CreateArrayCmd(tableStart, machine_entries + 1, prel31, 0))
 
 decode_table(table_1, 1)
 decode_table(table_2, 2)
+
+# label and annotate Memory Decoder tables
+for decoder_table_name, decoder_table_addr in addressDecoderInfoTables:
+	print("labelling %s @ %s:0x%x" % (decoder_table_name, MEMORY_MAP_NAME, decoder_table_addr))
+	tableStart = romAddr(decoder_table_addr - 0x24)
+	createLabel(tableStart, "__MemCtrl_%s" % cleanup_identifier(decoder_table_name), True)
+	forceSetDataType(tableStart, DecoderInfoStruct)
