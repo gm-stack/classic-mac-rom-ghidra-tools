@@ -4,8 +4,9 @@
 #
 
 from ghidra.program.model.symbol.SourceType import *
-from ghidra.program.model.data import ArrayDataType, EnumDataType, PointerTypedef
-from ghidra.program.model.symbol.RefType import DATA as RefType_Data
+from ghidra.program.model.data import ArrayDataType, EnumDataType, PointerTypedef, StructureDataType, CategoryPath
+from ghidra.program.model.symbol import RefType, SourceType
+from ghidra.program.database.data import TypedefDB
 from ghidra.app.cmd.data import CreateArrayCmd
 from ghidra.program.model.data import DataTypeConflictHandler, DataUtilities
 from ghidra.app.util.cparser.C import CParser
@@ -14,6 +15,13 @@ import string
 
 ROM_START_ADDR=0x0
 MEMORY_MAP_NAME='_rom'
+
+memory = currentProgram.getMemory()
+reference_manager = currentProgram.getReferenceManager()
+data_type_manager = currentProgram.getDataTypeManager()
+
+base_category = CategoryPath("/UniversalTables")
+data_type_manager.createCategory(base_category)
 
 boxnames = [
 	"II", "IIx", "IIcx", "SE/30", "Portable", "IIci", "Four Square", "IIfx", "Aurora CX16", "Aurora SE25", "Aurora SE16", "Classic", "IIsi", "LC", "Quadra 900", "PowerBook 170",
@@ -79,11 +87,17 @@ rom_offsets = {
 		0xb46ffb63: [0x00014390, 0x00014398, 18, 48, 88, 'PowerBook G3 "WallStreet"']
 }
 
-data_type_manager = currentProgram.getDataTypeManager()
+def subcategory_path(subcategory):
+	if subcategory:
+		new_category = CategoryPath(base_category, subcategory) # new CategoryPath with appending string
+		data_type_manager.createCategory(new_category)
+		return new_category
+	return base_category
 
-def parseC(struct_txt):
+def parseC(struct_txt, subcategory=None):
 	parser = CParser(data_type_manager)
 	parsed_datatype = parser.parse(struct_txt)
+	parsed_datatype.setCategoryPath(subcategory_path(subcategory))
 	return data_type_manager.addDataType(parsed_datatype, DataTypeConflictHandler.REPLACE_HANDLER)
 
 def cleanup_identifier(dirty_name):
@@ -95,9 +109,9 @@ def cleanup_identifier(dirty_name):
 	dirty_name = dirty_name.replace("+","plus")
 	return dirty_name
 
-def array_to_enum(data, name, size):
+def array_to_enum(data, name, size, subcategory=None):
 	already_included=set()
-	enum = EnumDataType(name, size)
+	enum = EnumDataType(subcategory_path(subcategory), name, size)
 	for count, value in enumerate(data):
 		clean_identifier = cleanup_identifier(value)
 		while clean_identifier in already_included:
@@ -106,9 +120,14 @@ def array_to_enum(data, name, size):
 		enum.add(clean_identifier, count)
 	data_type_manager.addDataType(enum, DataTypeConflictHandler.REPLACE_HANDLER)
 
-array_to_enum(boxnames, "boxInfo", 1)
-array_to_enum(decoders, "memDecoderType", 1)
+def createShiftedPointer(data_type, name, shift):
+	shifted = PointerTypedef(name, data_type, -1, data_type_manager, shift)
+	shifted.setCategoryPath(data_type.getCategoryPath()) # same category as the one we derive from
+	data_type_manager.addDataType(shifted, DataTypeConflictHandler.REPLACE_HANDLER)
+	return shifted
 
+array_to_enum(boxnames, "boxInfo", 1, subcategory='MachineInfo_fields')
+array_to_enum(decoders, "memDecoderType", 1, subcategory='MachineInfo_fields')
 
 hwCfgFlagsStruct = parseC("""struct hwCfgFlags {
 	bool hasSCSI:1;
@@ -119,9 +138,9 @@ hwCfgFlagsStruct = parseC("""struct hwCfgFlags {
     bool hasADB:1;
     bool isRunningA_UX:1;
     bool hasPowerManager:1;
-};""")
+};""", subcategory='MachineInfo_fields')
 
-baseAddrFlags = parseC("""struct baseAddrFlags {
+baseAddrFlags = parseC("""struct baseAddrValidFlags {
 	bool Unused31Exists:1;
 	bool NewAgeExists:1;
 	bool PatchROMAddrExists:1;
@@ -154,34 +173,79 @@ baseAddrFlags = parseC("""struct baseAddrFlags {
 	bool VIA1Exists:1;
 	bool diagROMExists:1;
 	bool ROMExists:1;
-};""")
+};""", subcategory='MachineInfo_fields')
 
-# probably only valid for machines with 18, 32, 60 in table above.
-# Need to pull apart some other ROMs to figure out what's going on.
+egretFwFlags = parseC("""typedef enum EgretFWFlags {
+    EgretNone=0,
+    Egret8=1,
+    Caboose=2,
+    CUDA=3,
+    EgretFWSpare4=4,
+    EgretFWSpare5=5,
+    EgretFWSpare6=6,
+    EgretFWSpare7=7
+} EgretFWFlags;""", subcategory='MachineInfo_fields')
 
-machineInfo = parseC("""struct machineInfo {
-    prel31 addrDecoderInfo;
-    prel31 RamInfo;
-    prel31 VideoInfo;
-    prel31 NuBusInfo;
-    hwCfgFlags hwCfgFlags;
-    byte unusedBits;
-    boxInfo productKindBoxInfo;
-    memDecoderType decoderKind;
-    word rom85flags;
-    byte romRsrcConfig;
-    byte ProductInfoVersion; // potentially this tells us field formats
-    baseAddrFlags baseAddressFlags0_31;
-    ulong extFeatureFlags;
-    ulong via1;
-    ulong via2;
-    ulong extFeatureFlags2;
-    ulong extFeatureFlags3;
-    int VIA1InitOffset;
-    int VIA2InitOffset;
-    prel31 VIA1InitInfo;
-    ulong MachineCPUID;
-};""")
+clockFlags = parseC("""typedef enum ClockFlags {
+    ClockRTC=0,
+    ClockPwrMgr=1,
+    ClockEgret=2,
+    ClockNoPRAM=3,
+    ClockSpare4=4,
+    ClockSpare5=5,
+    ClockSpare6=6,
+    ClockSprae7=7
+} ClockFlags;""", subcategory='MachineInfo_fields')
+
+keySwFlags = parseC("""typedef enum KeySWFlags {
+    KeyswNone=0,
+    KeyswCaboose=1,
+    KeyswSpare2=2,
+    KeySWSpare3=3
+} KeySWFlags;""", subcategory='MachineInfo_fields')
+
+adbEnum = parseC("""typedef enum ADBFlags {
+    ADBGITransciever=0,
+    ADBPwrMgr=1,
+    ADBIop=2,
+    ADBEgret=3,
+    ADBSpare4=4,
+    ADBSpare5=5,
+    ADBSpare6=6,
+    ADBSpare7=7
+} ADBFlags;""", subcategory='MachineInfo_fields')
+
+soundFlags = parseC("""struct SoundFlags {
+    bool SoundLineLevel:1;
+    bool HasDFAC2:1;
+    bool PlayAndRecord:1;
+    bool StereoMixing:1;
+    bool StereoOut:1;
+    bool StereoIn:1;
+    bool SixteenBit:1;
+    bool HasSoundIn:1;
+};""", subcategory='MachineInfo_fields')
+
+extFeatureFlags = parseC("""struct extFeatureFlags {
+    bool hasNewMemMgr:1;
+    bool SoftVBL:1;
+    bool hasHardPowerOff:1;
+    bool SupportsROMDisk:1;
+    bool SupportsBtnInt:1;
+    enum EgretFWFlags egretFWMask:3;
+    bool DJMemCChipBit:1;
+    bool SonoraExistsbit:1;
+    bool NiagraExistsBit:1;
+    bool mscChipBit:1;
+    enum KeySWFlags KeySW:2;
+    bool PMgrNewIntf:1;
+    bool supportsIdle:1;
+    struct SoundFlags soundByte;
+    bool V8Chip:1;
+    enum ClockFlags Clock:3;
+    enum ADBFlags ADB:3;
+    bool PGCInstalled:1;
+};""", subcategory='MachineInfo_fields')
 
 addrDecoderInfo = parseC("""struct addrDecoderInfo {
 	// "private" vars, 0x24 in size. Need to make "shifted" type in this script.
@@ -245,17 +309,51 @@ addrDecoderInfo = parseC("""struct addrDecoderInfo {
 	// pointer Sebastian;
 	// pointer BART;
 	// pointer Grand_Central;
-};""")
+};""", subcategory='AddrDecoder')
 
-def createShiftedPointer(data_type, name, shift):
-	shifted = PointerTypedef(name, data_type, -1, data_type_manager, shift)
-	data_type_manager.addDataType(shifted, DataTypeConflictHandler.REPLACE_HANDLER)
-	return shifted
-
+# create "shifted" version of the pointer, as there are fields with "negative" offsets
 createShiftedPointer(addrDecoderInfo, "addrDecoderInfo_public", 0x24)
 
+# probably only valid for machines with 18, 32, 60 in table above.
+# Need to pull apart some other ROMs to figure out what's going on.
 
-memory = currentProgram.getMemory()
+machineInfo = parseC("""struct machineInfo {
+    addrDecoderInfo_public addrDecoderInfo;
+    ulong ramInfo; // not relative to this address, relative to start of struct
+    ulong videoInfo; // not relative to this address, relative to start of struct
+    ulong nuBusInfo;
+    hwCfgFlags hwCfgFlags;
+    byte unusedBits;
+    boxInfo productKindBoxInfo;
+    memDecoderType decoderKind;
+    word rom85flags;
+    byte romRsrcConfig;
+    byte ProductInfoVersion; // potentially this tells us field formats
+    baseAddrValidFlags baseAddressValidFlags;
+    extFeatureFlags extFeatureFlags;
+    ulong via1;
+    ulong via2;
+    ulong extFeatureFlags2;
+    ulong extFeatureFlags3;
+    int VIA1InitOffset;
+    int VIA2InitOffset;
+    ulong VIA1InitInfo;
+    ulong MachineCPUID;
+};""")
+
+machineInfoRelativePointers = [
+	"addrDecoderInfo",
+	"ramInfo",
+	"videoInfo",
+	"nuBusInfo"
+	# also the VIA?
+]
+
+def createStructWithArray(dt, count, name, componentName, subcategory=None):
+	s = StructureDataType(subcategory_path(subcategory), name, 0)
+	a = ArrayDataType(dt, count, 0)
+	s.add(a, -1, componentName, None)
+	return data_type_manager.addDataType(s, DataTypeConflictHandler.REPLACE_HANDLER)
 
 def readDT(address,data_type,readfunc,sizemask):
 	data = readfunc(address)
@@ -263,11 +361,46 @@ def readDT(address,data_type,readfunc,sizemask):
 	return data
 
 read_uLong = lambda a: readDT(a, 'long', memory.getInt, 0xFFFFFFFF)
-read_long = lambda a: readDT(a, 'long', memory.getInt, None)
+read_int = lambda a: readDT(a, 'long', memory.getInt, None)
 read_uWord = lambda a: readDT(a, 'word', memory.getShort, 0xFFFF)
 read_uByte = lambda a: readDT(a, 'byte', memory.getByte, 0xFF)
 
-romAddr = lambda a: toAddr('%s%s%x' % (MEMORY_MAP_NAME, ':' if MEMORY_MAP_NAME else '' ,ROM_START_ADDR + a))
+forceSetDataType = lambda addr, dtype: DataUtilities.createData(
+	currentProgram, addr, dtype, 0, 
+	False, DataUtilities.ClearDataMode.CLEAR_ALL_CONFLICT_DATA
+)
+
+def structWithRelativePointers(ptr, structType, structRelativePointers):
+	struct = forceSetDataType(ptr, structType)
+	struct_members = { c.getFieldName() : c for c in structType.getComponents() }
+	
+	for component in structRelativePointers:
+		component_member = struct_members[component]		# get which component, by name
+		component_offset = component_member.getOffset() 	# offset for struct item from start of struct
+		component_addr = ptr.add(component_offset)			# absolute address in memory of struct item
+		component_dest_offset = read_int(component_addr)	# relative offset stored in struct item (relative to struct base)
+		component_dest = ptr.add(component_dest_offset)		# derived absolute address that struct item is pointed to
+
+		for ref in reference_manager.getReferencesFrom(component_addr): # clear out all other defined references on this data
+			reference_manager.delete(ref)
+		
+		dt_offset = 0										# assume default offset of 0 for pointer
+		component_dt = component_member.getDataType()
+		if type(component_dt) is TypedefDB:					# but if it's a typedef, there may be an offset
+			component_offset_setting = {s.getName(): s for s in component_dt.getTypeDefSettingsDefinitions()}['Component Offset']
+			dt_offset = component_offset_setting.getValue(component_member.getDefaultSettings())
+
+		print("adding reference to %s (%i) %s -> %s +(0x%x)" % (component, component_offset, component_addr, component_dest, dt_offset))
+		new_ref = reference_manager.addShiftedMemReference(
+			component_addr, 					# from address
+			component_dest.add(-dt_offset), 	# to address (shifted by data type offset, so struct points to start)
+			dt_offset, 							# pointer offset shifted by (does Ghidra even use this?)
+			RefType.DATA, 
+			SourceType.USER_DEFINED, 
+			0									# operand ID is 0 for data references
+		)
+
+romAddr = lambda a: toAddr('%s%s%x' % (MEMORY_MAP_NAME, ':' if MEMORY_MAP_NAME else '', ROM_START_ADDR + a))
 
 checksum_ptr = romAddr(0x0)
 checksum = read_uLong(checksum_ptr)
@@ -279,11 +412,6 @@ table_1, table_2, box_offset, via_offset, machine_offset, machine_name = rom_off
 print("Detected ROM as %s" % machine_name)
 setEOLComment(checksum_ptr, machine_name)
 
-forceSetDataType = lambda addr, dtype: DataUtilities.createData(
-	currentProgram, addr, dtype, 0, 
-	False, DataUtilities.ClearDataMode.CLEAR_ALL_CONFLICT_DATA
-)
-
 addressDecoderInfoTables = set()
 
 def decode_table(table_pos, table_num):
@@ -292,6 +420,7 @@ def decode_table(table_pos, table_num):
 	
 	createLabel(tableStart, "__Universal_Table_%i" % table_num, True)
 	createLabel(tableStart.add(-4), "__Universal_Table_%i_MinusFour" % table_num, True)
+
 	machine_entries = 0
 	
 	while True:
@@ -305,7 +434,7 @@ def decode_table(table_pos, table_num):
 
 		machine_entries += 1
 		info_ptr = table_entry_addr.add(entry)
-		forceSetDataType(info_ptr, machineInfo)
+		structWithRelativePointers(info_ptr, machineInfo, machineInfoRelativePointers)
 
 		box_ptr = info_ptr.add(box_offset)
 		boxInfo = read_uByte(box_ptr)
@@ -316,7 +445,7 @@ def decode_table(table_pos, table_num):
 		createLabel(info_ptr, labelName , True)
 
 		# save unique combinations of absolute address decoder mem info and decoder name
-		addr_decoder_offset = read_long(info_ptr)
+		addr_decoder_offset = read_int(info_ptr)
 		addr_decoder_ptr = table_pos + entry + addr_decoder_offset
 		addressDecoderInfoTables.add((decoder(decoder_info), addr_decoder_ptr))
 
@@ -326,7 +455,14 @@ def decode_table(table_pos, table_num):
 	# make a nice array of machines, using prel31 datatype to have Ghidra resolve relative pointers
 	print("got %i machines" % machine_entries)
 	prel31 = getDataTypes('prel31')[0]
-	runCommand(CreateArrayCmd(tableStart, machine_entries + 1, prel31, 0))
+	tableDT = createStructWithArray(prel31, machine_entries, "MachineTable%i" % table_num, "machines", subcategory='MachineTable')
+	forceSetDataType(tableStart, tableDT)
+	createShiftedPointer(tableDT, "MachineTable%i_Minus4" % table_num, 4)
+
+
+
+
+	#runCommand(CreateArrayCmd(tableStart, machine_entries + 1, prel31, 0))
 
 decode_table(table_1, 1)
 decode_table(table_2, 2)
