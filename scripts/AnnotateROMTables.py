@@ -400,7 +400,7 @@ designCenter = parseC("""typedef enum designCenter {
 } designCenter;""", subcategory='CPUID')
 
 # cpuid flags
-cpuIDFlags = parseC("""struct cpuIDFlags {
+cpuIDValue = parseC("""struct cpuIDValue {
     enum designCenter designCenter:4;
     bool id_elsewhere:1;
     word cpuid_value:11;
@@ -411,7 +411,7 @@ cpuIDFlags = parseC("""struct cpuIDFlags {
 # as a data type for decompilation
 cpuid = parseC("""struct cpuid {
 	word cpuIDSig; // should be $A55A
-	struct cpuIDFlags flags;
+	struct cpuIDValue cpuIDValue;
 };""", subcategory='CPUID')
 
 # TODO: put this in a different script for function returns?
@@ -438,8 +438,8 @@ machineInfo = parseC("""struct machineInfo {
     byte ProductInfoVersion; // potentially this tells us field formats
     baseAddrValidFlags baseAddressValidFlags;
     extFeatureFlags extFeatureFlags;
-    ulong via1;
-    ulong via2;
+    ulong viaIDMask;
+    ulong viaIDMatch;
     ulong extFeatureFlags2;
     ulong extFeatureFlags3;
     int VIA1InitOffset;
@@ -619,6 +619,6 @@ decode_table(table_2, 2)
 # TODO: move this elsewhere?
 for decoder_table_name, decoder_table_addr in addressDecoderInfoTables:
 	tableStart = romAddr(decoder_table_addr - 0x24)
-	print("labelling %s @ %s" % (decoder_table_name, tableStart))
+	print("labelling %s @ %s" % (decoder_table_name, decoder_table_addr))
 	createLabel(tableStart, "__MemCtrl_%s" % cleanup_identifier(decoder_table_name), True)
 	forceSetDataType(tableStart, addrDecoderInfo)
