@@ -209,38 +209,38 @@ hwCfgFlagsStruct = parseC("""struct hwCfgFlags {
 # Flags for whether base addresses defined in memory decoder table
 # are actually valid for this specific machine
 baseAddrValidFlags = parseC("""struct baseAddrValidFlags {
-	bool Unused31Exists:1;
-	bool NewAgeExists:1;
-	bool PatchROMAddrExists:1;
-	bool ROMPhysAddrExists:1;
-	bool PSC_DMAExists:1;
-	bool DAFB_or_CivicExists:1;
-	bool SCSI96_2_extExists:1;
-	bool SCSI96_1_intExists:1;
-	bool SONICExists:1;
-	bool JAWSExists:1;
-	bool OrwellExists:1;
-	bool RPUExists:1;
-	bool FMCExists:1;
-	bool OSSExists:1;
-	bool SCCIOPExists:1;
-	bool SWIMIOPExists:1;
-	bool SCSIDMAExists:1;
-	bool VDACExists:1;
-	bool RBVExists:1;
-	bool ASCExists:1;
-	bool VIA2Exists:1;
-	bool SCSIHskExists:1;
-	bool SCSIDackExists:1;
-	bool SCSIExists:1;
-	bool SoundExists:1;
-	bool PWMExists:1;
-	bool IWM_SWIMExists:1;
-	bool SCCWriteExists:1;
-	bool SCCReadExists:1;
-	bool VIA1Exists:1;
-	bool diagROMExists:1;
-	bool ROMExists:1;
+	bool Unused31Exists:1;		// 0x80000000
+	bool NewAgeExists:1;		// 0x40000000
+	bool PatchROMAddrExists:1;	// 0x20000000
+	bool ROMPhysAddrExists:1;	// 0x10000000
+	bool PSC_DMAExists:1;		// 0x8000000
+	bool DAFB_or_CivicExists:1;	// 0x4000000
+	bool SCSI96_2_extExists:1;	// 0x2000000
+	bool SCSI96_1_intExists:1;	// 0x1000000
+	bool SONICExists:1;			// 0x800000
+	bool JAWSExists:1;			// 0x400000
+	bool OrwellExists:1;		// 0x200000
+	bool RPUExists:1;			// 0x100000
+	bool FMCExists:1;			// 0x80000
+	bool OSSExists:1;			// 0x40000
+	bool SCCIOPExists:1;		// 0x20000
+	bool SWIMIOPExists:1;		// 0x10000
+	bool SCSIDMAExists:1;		// 0x8000
+	bool VDACExists:1;			// 0x4000
+	bool RBVExists:1;			// 0x2000
+	bool ASCExists:1;			// 0x1000
+	bool VIA2Exists:1;			// 0x800
+	bool SCSIHskExists:1;		// 0x400
+	bool SCSIDackExists:1;		// 0x200
+	bool SCSIExists:1;			// 0x100
+	bool SoundExists:1;			// 0x80
+	bool PWMExists:1;			// 0x40
+	bool IWM_SWIMExists:1;		// 0x20
+	bool SCCWriteExists:1;		// 0x10
+	bool SCCReadExists:1;		// 0x8
+	bool VIA1Exists:1;			// 0x4
+	bool diagROMExists:1;		// 0x2
+	bool ROMExists:1;			// 0x1
 };""", subcategory='MachineInfo_fields')
 
 # Decode multi-bit type for EgretFW
@@ -324,12 +324,11 @@ extFeatureFlags = parseC("""struct extFeatureFlags {
 };""", subcategory='MachineInfo_fields')
 
 # AddressDecoderInfo "private" fields - negative offset to pointer
+# this was 0x24 in size (according to UniversalEqu.a) -
+# but I noticed __GETVIAINPUTS was being passed the pointer minus 0x14.
+# and there are only zeros above this point...
 addrDecoderInfoPrivate = parseC("""struct addrDecoderInfo_private {
-	// "private" vars that exist at negative offset to pointer, 0x24 in size.
-    long unknown1;
-    long unknown2;
-    long unknown3;
-    long unknown4;
+	// "private" vars that exist at negative offset to pointer, 0x14 in size.
     struct baseAddrValidFlags defaultBases;
     struct extFeatureFlags defaultExtFeatures;
     byte avoidVIA1A;
@@ -338,7 +337,7 @@ addrDecoderInfoPrivate = parseC("""struct addrDecoderInfo_private {
     byte avoidVIA2B;
     long checkForProc;
     byte addrMap;
-    byte decoderInfoVers;
+    byte decoderInfoVers; // 0 for all these
     byte filler[2];
 };""", subcategory='AddrDecoder')
 
@@ -389,7 +388,8 @@ addrDecoderInfo = parseC("""struct addrDecoderInfo {
 # create "shifted" version of the pointer
 # with as base address points to start of addrDecoderInfo_public
 # inside addrDecoderInfo, not start of addrDecoderInfo
-createShiftedPointer(addrDecoderInfo, "addrDecoderInfo_shifted", 0x24)
+private_fields_length = addrDecoderInfoPrivate.getLength()
+createShiftedPointer(addrDecoderInfo, "addrDecoderInfo_shifted", private_fields_length)
 
 # Decode multi-bit type for designCenter
 designCenter = parseC("""typedef enum designCenter {
@@ -413,14 +413,6 @@ cpuid = parseC("""struct cpuid {
 	word cpuIDSig; // should be $A55A
 	struct cpuIDValue cpuIDValue;
 };""", subcategory='CPUID')
-
-# TODO: put this in a different script for function returns?
-# TODO: along with code to find that function and set params/return type
-# can be used as return type for GetCPUID
-cpuid = parseC("""struct GetCPUIDReg_ret {
-	struct cpuid cpuid;
-	bool found;
-};""", subcategory='func_returns', packing=1)
 
 # probably only valid for machines with 18, 32, 60 in table above.
 # Need to pull apart some other ROMs to figure out what's going on.
@@ -469,6 +461,35 @@ def createStructWithArray(dt_name, count, name, componentName, subcategory=None)
 	a = ArrayDataType(dt[0], count, 0)
 	s.add(a, -1, componentName, None)
 	return data_type_manager.addDataType(s, DataTypeConflictHandler.REPLACE_HANDLER)
+
+###############
+# Types for function returns
+###############
+
+# TODO: put these in a different script for function returns?
+# TODO: along with code to find that function and set params/return type
+
+cpuid = parseC("""struct GetCPUIDReg_ret {
+	struct cpuid cpuid;
+	bool found;
+};""", subcategory='func_returns', packing=1)
+
+GetHardwareInfo_ret = parseC("""struct GetHardwareInfo_ret {
+	addrDecoderInfo_shifted addrDecoderInfo;
+	struct machineInfo *ProductInfo;
+	struct baseAddrValidFlags baseAddrValidFlags;
+	struct extFeatureFlags extFeaturesFlags;
+	byte unused;
+	struct hwCfgFlags hwCfgFlags;
+	boxInfo boxInfo;
+	memDecoderType memDecoderType;
+};""", subcategory='func_returns', packing=1)
+
+GetHardwareInfo_D2w = parseC("""struct GetHardwareInfo_D2w {
+	boxInfo boxInfo;
+	memDecoderType memDecoderType;
+};""", subcategory='func_returns', packing=1)
+
 
 ###############
 # Memory management
