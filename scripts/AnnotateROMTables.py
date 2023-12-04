@@ -8,6 +8,7 @@
 ###############
 
 import string
+from collections import defaultdict
 
 from ghidra.program.model.symbol.SourceType import * # todo: resolve what is actually used from here
 from ghidra.program.model.data import ArrayDataType, EnumDataType, PointerTypedef, StructureDataType, CategoryPath, DataTypeConflictHandler, DataUtilities
@@ -21,9 +22,15 @@ from ghidra.app.util.cparser.C import CParser
 # settings
 ###############
 
-ROM_START_ADDR=0x0
-ADDRESS_SPACE_NAME='_rom'
+#ROM_START_ADDR=0x0
+#ADDRESS_SPACE_NAME='_rom'
+#BASE_CATEGORY_NAME='/UniversalTables'
+#LABEL_PREFIX='__'
+
+ROM_START_ADDR=0x40800000
+ADDRESS_SPACE_NAME=None
 BASE_CATEGORY_NAME='/UniversalTables'
+LABEL_PREFIX=''
 
 
 ###############
@@ -176,11 +183,6 @@ boxnames = [
 	"PowerBook Duo 280", "PowerBook Duo 280c", "Quadra 900 w/RISC Card", "Quadra 950 w/RISC Card", "Centris 610 w/RISC Card", "Quadra 800 w/RISC Card", "Quadra 610 w/RISC Card", "Quadra 650 w/RISC Card", "Tempest w/RISC Card", "PDM 50L", "PowerMac 7100", "PDM 80L", "Blackbird BFD", "PowerBook 150", "Quadra 700 w/STP", "Quadra 900 w/STP",
 	"Quadra 950 w/STP", "Centris 610 w/STP", "Centris 650 w/STP", "Quadra 610 w/STP", "Quadra 650 w/STP", "Quadra 800 w/STP", "PowerBook Duo 2300", "AJ 80", "PowerBook 5x0 PowerPC upgrade", "Malcolm BB80", "PowerBook 5300", "M2 80", "MAE on HP/UX", "MAE on AIX", "MAE on AUX", "Extended"
 ]
-def boxname(num):
-	# used for creating labels
-	if num >= 128: return "unknown (%i)" % num
-	return boxnames[num]
-
 array_to_enum(boxnames, "boxInfo", 1, subcategory='MachineInfo_fields')
 
 # memDecoderType field - which kind of memory decoder (stolen from Unirom)
@@ -188,10 +190,6 @@ decoders = [
 	"Unknown", "PALs", "BBU", "Normandy", "Mac II Glue", "MDU", "FMC", "V8/Eagle/Spice", "Orwell", "Jaws", "MSC", "Sonora/Ardbeg/Tinker Bell", "Niagra", "YMCA or djMEMC/MEMCjr/F108",
 	"djMEMC/MEMCjr/F108", "HMC", "Pratt", "Hammerhead", "Tinker Bell", "19", "20", "21", "22", "23", "Grackle"
 ]
-def decoder(num):
-	if num >= 25: return "unknown (%i)" % num
-	return decoders[num]
-
 array_to_enum(decoders, "memDecoderType", 1, subcategory='MachineInfo_fields')
 
 # Hardware config flags
@@ -325,7 +323,7 @@ extFeatureFlags = parseC("""struct extFeatureFlags {
 
 # AddressDecoderInfo "private" fields - negative offset to pointer
 # this was 0x24 in size (according to UniversalEqu.a) -
-# but I noticed __GETVIAINPUTS was being passed the pointer minus 0x14.
+# but I noticed GETVIAINPUTS was being passed the pointer minus 0x14.
 # and there are only zeros above this point...
 addrDecoderInfoPrivate = parseC("""struct addrDecoderInfo_private {
 	// "private" vars that exist at negative offset to pointer, 0x14 in size.
@@ -414,13 +412,44 @@ cpuid = parseC("""struct cpuid {
 	struct cpuIDValue cpuIDValue;
 };""", subcategory='CPUID')
 
+# nubus
+nuBusSlot = parseC("""struct nuBusSlot {
+    bool unused:1;
+    bool dockingSlot:1;
+    bool slotReserved:1;
+    bool directSlot:1;
+    bool slotDisabled:1;
+    bool hasConnector:1;
+    bool canInterrupt:1;
+    bool hasPRAM:1;
+};""", subcategory='Nubus')
+
+nuBusInfo = parseC("""struct nuBusInfo {
+	struct nuBusSlot Slot0;
+	struct nuBusSlot Slot1;
+	struct nuBusSlot Slot2;
+	struct nuBusSlot Slot3;
+	struct nuBusSlot Slot4;
+	struct nuBusSlot Slot5;
+	struct nuBusSlot Slot6;
+	struct nuBusSlot Slot7;
+	struct nuBusSlot Slot8;
+	struct nuBusSlot Slot9;
+	struct nuBusSlot SlotA;
+	struct nuBusSlot SlotB;
+	struct nuBusSlot SlotC;
+	struct nuBusSlot SlotD;
+	struct nuBusSlot SlotE;
+	struct nuBusSlot SlotF;
+};""", subcategory='Nubus')
+
 # probably only valid for machines with 18, 32, 60 in table above.
 # Need to pull apart some other ROMs to figure out what's going on.
 machineInfo = parseC("""struct machineInfo {
     addrDecoderInfo_shifted addrDecoderInfo;
     ulong ramInfo; // not relative to this address, relative to start of struct
     ulong videoInfo; // not relative to this address, relative to start of struct
-    ulong nuBusInfo;
+    nuBusInfo *nuBusInfo;
     hwCfgFlags hwCfgFlags;
     byte unusedBits;
     boxInfo productKindBoxInfo;
@@ -514,19 +543,68 @@ read_int = lambda a: readDT(a, 'long', memory.getInt, None)			# 32 bit signed
 read_uWord = lambda a: readDT(a, 'word', memory.getShort, 0xFFFF)	# 16 bit unsigned
 read_uByte = lambda a: readDT(a, 'byte', memory.getByte, 0xFF)		# 8 bit unsigned
 
-def forceSetDataType(addr, dtype):
+def resolveBaseType(ptr_type):
+	if type(ptr_type) is ghidra.program.database.data.PointerDB:
+		return resolveBaseType(ptr_type.getDataType())
+	if type(ptr_type) is ghidra.program.database.data.TypedefDB:
+		return resolveBaseType(ptr_type.getDataType())
+	return ptr_type
+
+class usefulStructWrapper(object):
+	# allows you to assign a struct to a memory location with applyDataType
+	# then read back the values of that struct:
+	# s = applyDataType(someAddr, someStruct)
+	# print(s.someField)
+	
+	def __init__(self, struct):
+		self._struct = struct
+		self._members = { 
+			c.getFieldName() : c 
+			for c in [
+				struct.getComponent(cc) 
+				for cc in range(struct.getNumComponents())
+			]
+		}
+
+	def __getattr__(self, name):
+		if name in self._members:
+			m = self._members[name]
+			# TODO: fix for more data types.
+			dt = m.getDataType()
+			primaryReference = m.getPrimaryReference(0)
+			if primaryReference: # it's a pointer to somewhere else, with reference set. FIXME: it's just a normal pointer to somewhere else
+				to_addr = primaryReference.getToAddress()
+				dt = m.getDataType()
+				dt = resolveBaseType(dt)
+				wrapped = applyDataType(to_addr, dt) # FIXME: we should probably check it is a struct... otherwise return DefaultValueRepresentation
+				return wrapped
+			elif type(dt) is ghidra.program.database.data.StructureDB:
+				return usefulStructWrapper(m)
+			else:
+				return m.getDefaultValueRepresentation()
+		raise AttributeError
+	
+	def __repr__(self): # print values as well as keys
+		return "---\n" + "\n".join(str(m) for m in self._members) + "\n---"
+
+
+def applyDataType(addr, dtype):
 	# Create data type at address
 	# forcibly clearing out anything that was there already
-	return DataUtilities.createData(
+	# also wrap the returned structure if structure
+	data =  DataUtilities.createData(
 		currentProgram, addr, dtype, 0, 
 		False, DataUtilities.ClearDataMode.CLEAR_ALL_CONFLICT_DATA
 	)
+	if data.isStructure():
+		return usefulStructWrapper(data)
+	return data
 
 def structWithRelativePointers(ptr, structType, structRelativePointers):
 	# Apply a struct to a memory address
 	# setting appropriate x-refs for relative pointers
 	# provided in a list
-	struct = forceSetDataType(ptr, structType) # apply the struct
+	struct = applyDataType(ptr, structType) # apply the struct
 	struct_members = { c.getFieldName() : c for c in structType.getComponents() } # make lookup dict by struct component name
 	
 	for component in structRelativePointers:			# for each component in list of relative components
@@ -554,6 +632,26 @@ def structWithRelativePointers(ptr, structType, structRelativePointers):
 			SourceType.USER_DEFINED, 
 			0									# operand ID is 0 for data references
 		)
+	return struct
+
+managed_tables = defaultdict(lambda: defaultdict(set))
+
+def add_managed_table(data_type, addr, key):
+	# add a table to the list of tables to label
+	# all key entries will be gathered for a certain address
+	# if the table is referenced from multiple places
+	# the label will name all of them
+	# then the appropriate data type will be applied to each memory location
+	managed_tables[data_type][addr].add(key)
+
+def label_managed_tables():
+	# create labels and force set data types as described above
+	for dt, items in managed_tables.iteritems():
+		for address, names in items.iteritems():
+			label_name = cleanup_identifier(LABEL_PREFIX + dt.getName() + "_" + "_".join(names))
+			print("labelling %s @ %s" % (label_name, address))
+			createLabel(address, label_name, True)
+			applyDataType(address, dt)
 
 ###############
 # Analysis functions
@@ -564,8 +662,8 @@ def decode_table(table_pos, table_num):
 	print("Decoding table %i at %s" % (table_num, tableStart))
 	
 	# label tables
-	createLabel(tableStart, "__Universal_Table_%i" % table_num, True)
-	createLabel(tableStart.add(-4), "__Universal_Table_%i_MinusFour" % table_num, True)
+	createLabel(tableStart, LABEL_PREFIX + "Universal_Table_%i" % table_num, True)
+	createLabel(tableStart.add(-4), LABEL_PREFIX + "Universal_Table_%i_MinusFour" % table_num, True)
 
 	# keep count of how many machines
 	machine_entries = 0
@@ -581,24 +679,25 @@ def decode_table(table_pos, table_num):
 
 		machine_entries += 1
 		info_ptr = table_entry_addr.add(entry) # MachineInfo struct is this many bytes away relative to this address
-		structWithRelativePointers(info_ptr, machineInfo, machineInfoRelativePointers) # put the struct on it
+		m = structWithRelativePointers(info_ptr, machineInfo, machineInfoRelativePointers) # put the struct on it
 
-		# decode some values to create a human readable symbol
-		box_ptr = info_ptr.add(box_offset)
-		boxInfo = read_uByte(box_ptr)
-		decoder_id_ptr = info_ptr.add(box_offset+1)
-		decoder_info = read_uByte(decoder_id_ptr)
-		labelName = "__Machine_%s_%s" % (boxname(boxInfo).replace(" ","_"),decoder(decoder_info).replace(" ","_"))
+		labelName = cleanup_identifier(LABEL_PREFIX + "Machine_%s_%s" % (m.productKindBoxInfo, m.decoderKind))
 		print("Labelling machine %s at %s" % (labelName, info_ptr))
 		createLabel(info_ptr, labelName , True)
+
+		# hey look what I can do!
+		#print(m.addrDecoderInfo.private.defaultBases.IWM_SWIMExists)
+		#print(m.nuBusInfo.SlotA)
 
 		# save unique combinations of absolute address for AddressInfo
 		# and key against decoders table
 		# although theoretically there could be more than one DecoderInfo for a given
 		# decoder, it seems there isn't
-		addr_decoder_offset = read_int(info_ptr)
+		addr_decoder_offset = read_int(romAddr(table_pos + entry))
 		addr_decoder_ptr = table_pos + entry + addr_decoder_offset
-		addressDecoderInfoTables.add((decoder(decoder_info), addr_decoder_ptr))
+		#addressDecoderInfoTables.add((decoder(decoder_info), addr_decoder_ptr))
+		add_managed_table(addrDecoderInfo, romAddr(addr_decoder_ptr - addrDecoderInfoPrivate.getLength()), m.decoderKind)
+		# TODO: get data type, address, name? from struct xref?
 
 		# go to next table entry - increment by 4 bytes
 		table_pos += 4
@@ -608,7 +707,7 @@ def decode_table(table_pos, table_num):
 	# TODO: does prel31 get used by decompiler, or should this be machineInfo*
 	# with memory X-ref?
 	tableDT = createStructWithArray('prel31', machine_entries, "MachineTable%i" % table_num, "machines", subcategory='MachineTable')
-	forceSetDataType(tableStart, tableDT)
+	applyDataType(tableStart, tableDT)
 	
 	# code uses a pointer to 4 bytes before, then does += 4 at start
 	createShiftedPointer(tableDT, "MachineTable%i_Minus4" % table_num, -4) 
@@ -636,10 +735,5 @@ addressDecoderInfoTables = set() # create a set for unique address decoders seen
 decode_table(table_1, 1)
 decode_table(table_2, 2)
 
-# label and annotate Memory Decoder tables
-# TODO: move this elsewhere?
-for decoder_table_name, decoder_table_addr in addressDecoderInfoTables:
-	tableStart = romAddr(decoder_table_addr - 0x24)
-	print("labelling %s @ %s" % (decoder_table_name, decoder_table_addr))
-	createLabel(tableStart, "__MemCtrl_%s" % cleanup_identifier(decoder_table_name), True)
-	forceSetDataType(tableStart, addrDecoderInfo)
+# label and annotate tables
+label_managed_tables()
